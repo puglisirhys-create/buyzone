@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState, useEffect, useRef } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 type AssetType = "CRYPTO" | "STOCK" | "ETF";
 type Zone = "IN_BUY_ZONE" | "APPROACHING" | "NOT_ATTRACTIVE";
@@ -12,27 +12,97 @@ type WatchItem = {
   note?: string;
   addedAt: number;
   zone: Zone;
+  confidence: number;
 };
 
-const STORAGE_KEY = "buyzone-watchlist"; // keep this stable (no version bumps)
+const STORAGE_KEY = "buyzone-watchlist";
 
 const styles = {
-  page: { minHeight: "100vh", background: "#000", color: "#fff", padding: 24 },
-  wrap: { maxWidth: 860, margin: "0 auto" },
-  card: { border: "1px solid rgba(255,255,255,0.12)", borderRadius: 18, padding: 18 },
-  row: { display: "flex", gap: 10, flexWrap: "wrap" as const },
+  page: {
+    minHeight: "100vh",
+    background: "#000",
+    color: "#EAEAEA",
+    padding: 40,
+    fontFamily: "Inter, system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif",
+  },
+  wrap: { maxWidth: 920, margin: "0 auto" },
+
+  headerTitle: { fontSize: 48, fontWeight: 700, margin: 0 },
+  headerSub: { opacity: 0.65, marginTop: 8, marginBottom: 26 },
+
+  card: {
+    borderRadius: 22,
+    padding: 20,
+    background: "#0B0B0D",
+    border: "1px solid rgba(255,255,255,0.07)",
+    boxShadow: "0 10px 28px rgba(0,0,0,0.55)",
+  },
+
+  row: { display: "flex", gap: 10, flexWrap: "wrap" as const, alignItems: "center" },
+
   input: {
     padding: "12px 14px",
     borderRadius: 12,
-    border: "1px solid rgba(255,255,255,0.12)",
-    background: "#000",
+    border: "1px solid rgba(255,255,255,0.10)",
+    background: "#111",
     color: "#fff",
+    outline: "none",
   },
-  btn: {
+
+  btnPrimary: {
     padding: "12px 16px",
     borderRadius: 12,
-    border: "1px solid rgba(255,255,255,0.12)",
+    border: "1px solid rgba(255,255,255,0.10)",
+    background: "rgba(255,255,255,0.12)",
+    color: "#fff",
     cursor: "pointer",
+  },
+
+  btnGhost: {
+    padding: "12px 16px",
+    borderRadius: 12,
+    border: "1px solid rgba(255,255,255,0.10)",
+    background: "transparent",
+    color: "rgba(255,255,255,0.85)",
+    cursor: "pointer",
+  },
+
+  metaRow: {
+    display: "flex",
+    justifyContent: "space-between",
+    marginTop: 16,
+    marginBottom: 12,
+    opacity: 0.7,
+    fontSize: 13,
+  },
+
+  itemCardBase: {
+    padding: 18,
+    borderRadius: 16,
+    border: "1px solid rgba(255,255,255,0.08)",
+    background: "#111",
+    display: "flex",
+    justifyContent: "space-between",
+    alignItems: "center",
+    gap: 14,
+  },
+
+  ticker: {
+    fontSize: 20,
+    fontWeight: 750,
+    letterSpacing: 0.6,
+    fontFamily: "ui-monospace, monospace",
+  },
+
+  subtle: { fontSize: 12, opacity: 0.7 },
+
+  badge: {
+    fontSize: 12,
+    fontWeight: 700,
+    padding: "7px 12px",
+    borderRadius: 999,
+    border: "1px solid rgba(255,255,255,0.10)",
+    whiteSpace: "nowrap" as const,
   },
 };
 
@@ -40,251 +110,221 @@ function normalizeTicker(v: string) {
   return v.trim().toUpperCase().replace(/\s+/g, "");
 }
 
+function isValidTicker(v: string) {
+  return /^[A-Z0-9.\-]{1,15}$/.test(v);
+}
+
 function typeLabel(t: AssetType) {
   return t === "CRYPTO" ? "Crypto" : t === "STOCK" ? "Stock" : "ETF";
 }
 
 function zoneLabel(z: Zone) {
-  return z === "IN_BUY_ZONE" ? "In Buy Zone" : z === "APPROACHING" ? "Approaching" : "Not Attractive";
+  return z === "IN_BUY_ZONE"
+    ? "In Buy Zone"
+    : z === "APPROACHING"
+    ? "Approaching"
+    : "Not Attractive";
 }
 
-function mockZone(ticker: string, type: AssetType): Zone {
-  const base = `${type}:${ticker}`;
-  let sum = 0;
-  for (let i = 0; i < base.length; i++) sum += base.charCodeAt(i);
-  const b = sum % 3;
-  return b === 0 ? "IN_BUY_ZONE" : b === 1 ? "APPROACHING" : "NOT_ATTRACTIVE";
+function hashToInt(input: string) {
+  let h = 0;
+  for (let i = 0; i < input.length; i++) h = (h * 31 + input.charCodeAt(i)) >>> 0;
+  return h;
 }
 
-// IMPORTANT: no Date.now() here (avoids hydration weirdness)
+function computeMockSignal(ticker: string, type: AssetType) {
+  const h = hashToInt(`${type}:${ticker}`);
+  const confidence = 35 + (h % 66);
+  const bucket = h % 3;
+  const zone: Zone =
+    bucket === 0 ? "IN_BUY_ZONE" : bucket === 1 ? "APPROACHING" : "NOT_ATTRACTIVE";
+  return { zone, confidence };
+}
+
+function confidenceBg(conf: number) {
+  if (conf >= 70) return "rgba(46,204,113,0.92)";
+  if (conf >= 50) return "rgba(241,196,15,0.92)";
+  return "rgba(255,255,255,0.10)";
+}
+
+function confidenceText(conf: number) {
+  if (conf >= 50) return "#000";
+  return "rgba(255,255,255,0.85)";
+}
+
+function glowShadow(conf: number) {
+  if (conf >= 70) return "0 0 22px rgba(46,204,113,0.45)";
+  if (conf >= 50) return "0 0 22px rgba(241,196,15,0.45)";
+  return "0 0 18px rgba(255,255,255,0.20)";
+}
+
 function defaultItems(): WatchItem[] {
+  const btc = computeMockSignal("BTC", "CRYPTO");
+  const aapl = computeMockSignal("AAPL", "STOCK");
   return [
-    { id: "1", ticker: "BTC", type: "CRYPTO", addedAt: 2, zone: "APPROACHING" },
-    { id: "2", ticker: "AAPL", type: "STOCK", addedAt: 1, zone: "NOT_ATTRACTIVE" },
+    { id: "seed-btc", ticker: "BTC", type: "CRYPTO", addedAt: 2, ...btc },
+    { id: "seed-aapl", ticker: "AAPL", type: "STOCK", addedAt: 1, ...aapl },
   ];
 }
 
-function safeParse<T>(raw: string | null): T | null {
-  if (!raw) return null;
+function safeLoad(): WatchItem[] | null {
   try {
-    return JSON.parse(raw) as T;
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return null;
+    return parsed;
   } catch {
     return null;
   }
 }
 
-function trySave(items: WatchItem[]) {
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(items));
+function safeSave(items: WatchItem[]) {
+  try {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(items));
+  } catch {}
 }
 
 export default function Home() {
-  const [mounted, setMounted] = useState(false);
-
   const [typeInput, setTypeInput] = useState<AssetType>("CRYPTO");
   const [tickerInput, setTickerInput] = useState("");
   const [noteInput, setNoteInput] = useState("");
+  const [message, setMessage] = useState<string | null>(null);
 
   const [items, setItems] = useState<WatchItem[]>(defaultItems);
-  const [status, setStatus] = useState<string | null>(null);
+  const didLoadRef = useRef(false);
 
-  const itemsRef = useRef(items);
   useEffect(() => {
-    itemsRef.current = items;
+    const saved = safeLoad();
+    if (saved) setItems(saved);
+    didLoadRef.current = true;
+  }, []);
+
+  useEffect(() => {
+    if (!didLoadRef.current) return;
+    safeSave(items);
   }, [items]);
 
-  useEffect(() => setMounted(true), []);
-
-  // Load saved data once
-  useEffect(() => {
-    if (!mounted) return;
-    try {
-      const saved = safeParse<WatchItem[]>(localStorage.getItem(STORAGE_KEY));
-      if (Array.isArray(saved)) {
-        setItems(saved.length ? saved : defaultItems());
-        setStatus("Loaded ✅");
-      } else {
-        setStatus("No saved data yet");
-      }
-    } catch (e: any) {
-      setStatus(`Load blocked: ${e?.message || "unknown error"}`);
-    }
-  }, [mounted]);
-
-  const sorted = useMemo(() => [...items].sort((a, b) => b.addedAt - a.addedAt), [items]);
-
-  function refresh() {
-    const next = itemsRef.current.map((x) => ({ ...x, zone: mockZone(x.ticker, x.type) }));
-    setItems(next);
-    try {
-      trySave(next);
-      setStatus("Saved ✅");
-    } catch (e: any) {
-      setStatus(`Save blocked: ${e?.message || "unknown error"}`);
-    }
-  }
+  const sorted = useMemo(
+    () => [...items].sort((a, b) => b.addedAt - a.addedAt),
+    [items]
+  );
 
   function addAsset() {
     const ticker = normalizeTicker(tickerInput);
     if (!ticker) return;
+    if (!isValidTicker(ticker)) return;
 
-    if (itemsRef.current.some((x) => x.ticker === ticker && x.type === typeInput)) {
-      setTickerInput("");
-      return;
-    }
+    setItems((prev) => {
+      if (prev.some((x) => x.ticker === ticker && x.type === typeInput))
+        return prev;
 
-    const item: WatchItem = {
-      id: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
-      ticker,
-      type: typeInput,
-      note: noteInput.trim() || undefined,
-      addedAt: Date.now(),
-      zone: mockZone(ticker, typeInput),
-    };
-
-    const next = [item, ...itemsRef.current];
-    setItems(next);
-
-    try {
-      trySave(next);
-      setStatus("Saved ✅");
-    } catch (e: any) {
-      setStatus(`Save blocked: ${e?.message || "unknown error"}`);
-    }
+      const signal = computeMockSignal(ticker, typeInput);
+      return [
+        {
+          id: `id-${Date.now()}`,
+          ticker,
+          type: typeInput,
+          note: noteInput || undefined,
+          addedAt: Date.now(),
+          ...signal,
+        },
+        ...prev,
+      ];
+    });
 
     setTickerInput("");
     setNoteInput("");
   }
 
+  function refresh() {
+    setItems((prev) =>
+      prev.map((x) => ({
+        ...x,
+        ...computeMockSignal(x.ticker, x.type),
+      }))
+    );
+  }
+
   function removeAsset(id: string) {
-    const next = itemsRef.current.filter((x) => x.id !== id);
-    setItems(next);
-
-    try {
-      trySave(next);
-      setStatus("Saved ✅");
-    } catch (e: any) {
-      setStatus(`Save blocked: ${e?.message || "unknown error"}`);
-    }
+    setItems((prev) => prev.filter((x) => x.id !== id));
   }
-
-  function clearAll() {
-    const next: WatchItem[] = [];
-    setItems(next);
-
-    try {
-      trySave(next);
-      setStatus("Saved ✅ (cleared)");
-    } catch (e: any) {
-      setStatus(`Save blocked: ${e?.message || "unknown error"}`);
-    }
-  }
-
-  if (!mounted) return null;
 
   return (
     <main style={styles.page}>
       <div style={styles.wrap}>
-        <h1 style={{ fontSize: 44, margin: 0 }}>BuyZone</h1>
-        <p style={{ opacity: 0.7, marginTop: 8 }}>Calm alerts when assets enter historically favourable buy zones.</p>
+        <h1 style={styles.headerTitle}>BuyZone</h1>
+        <p style={styles.headerSub}>Calm buy zone intelligence.</p>
 
         <section style={styles.card}>
-          <div style={{ display: "grid", gap: 10 }}>
-            <div style={styles.row}>
-              <select value={typeInput} onChange={(e) => setTypeInput(e.target.value as AssetType)} style={styles.input}>
-                <option value="CRYPTO">Crypto</option>
-                <option value="STOCK">Stock</option>
-                <option value="ETF">ETF</option>
-              </select>
-
-              <input
-                value={tickerInput}
-                onChange={(e) => setTickerInput(e.target.value)}
-                onKeyDown={(e) => e.key === "Enter" && addAsset()}
-                placeholder="Ticker (e.g., BTC, AAPL, VAS)"
-                style={{ ...styles.input, flex: 1, minWidth: 240 }}
-              />
-
-              <button onClick={addAsset} style={{ ...styles.btn, background: "rgba(255,255,255,0.10)", color: "#fff" }}>
-                Add
-              </button>
-
-              <button onClick={refresh} style={{ ...styles.btn, background: "transparent", color: "rgba(255,255,255,0.8)" }}>
-                Refresh
-              </button>
-
-              <button onClick={clearAll} style={{ ...styles.btn, background: "transparent", color: "rgba(255,255,255,0.8)" }}>
-                Clear
-              </button>
-            </div>
+          <div style={{ ...styles.row, marginBottom: 14 }}>
+            <select
+              value={typeInput}
+              onChange={(e) =>
+                setTypeInput(e.target.value as AssetType)
+              }
+              style={styles.input}
+            >
+              <option value="CRYPTO">Crypto</option>
+              <option value="STOCK">Stock</option>
+              <option value="ETF">ETF</option>
+            </select>
 
             <input
-              value={noteInput}
-              onChange={(e) => setNoteInput(e.target.value)}
-              placeholder="Optional note (e.g., long-term hold, weekly DCA)"
-              style={styles.input}
+              value={tickerInput}
+              onChange={(e) => setTickerInput(e.target.value)}
+              placeholder="Ticker"
+              style={{ ...styles.input, flex: 1 }}
             />
 
-            {status ? <div style={{ fontSize: 12, opacity: 0.75 }}>Status: {status}</div> : null}
-            <div style={{ fontSize: 12, opacity: 0.6 }}>
-              Tip: Always open the same URL (example: <span style={{ fontFamily: "monospace" }}>http://localhost:3000</span>). Different ports/addresses won’t share saved data.
-            </div>
+            <button onClick={addAsset} style={styles.btnPrimary}>
+              Add
+            </button>
+
+            <button onClick={refresh} style={styles.btnGhost}>
+              Refresh
+            </button>
           </div>
 
-          <div style={{ display: "flex", justifyContent: "space-between", marginTop: 14, opacity: 0.7 }}>
+          <div style={styles.metaRow}>
             <span>Watchlist</span>
             <span>{sorted.length} assets</span>
           </div>
 
-          <div style={{ marginTop: 12, display: "grid", gap: 10 }}>
+          <div style={{ display: "grid", gap: 14 }}>
             {sorted.map((item) => (
               <div
                 key={item.id}
                 style={{
-                  display: "flex",
-                  justifyContent: "space-between",
-                  gap: 12,
-                  alignItems: "center",
-                  border: "1px solid rgba(255,255,255,0.12)",
-                  borderRadius: 18,
-                  padding: 14,
-                  background: "rgba(255,255,255,0.03)",
+                  ...styles.itemCardBase,
+                  boxShadow: glowShadow(item.confidence),
                 }}
               >
-                <div style={{ display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap" as const }}>
-                  <div style={{ fontFamily: "monospace", fontSize: 18, padding: "8px 10px", borderRadius: 12, border: "1px solid rgba(255,255,255,0.12)" }}>
-                    {item.ticker}
+                <div>
+                  <div style={styles.ticker}>{item.ticker}</div>
+                  <div style={styles.subtle}>
+                    {typeLabel(item.type)} • {zoneLabel(item.zone)}
                   </div>
-
-                  <span style={{ fontSize: 12, padding: "6px 10px", borderRadius: 999, border: "1px solid rgba(255,255,255,0.12)", opacity: 0.85 }}>
-                    {typeLabel(item.type)}
-                  </span>
-
-                  <span
-                    style={{
-                      fontSize: 12,
-                      padding: "6px 10px",
-                      borderRadius: 999,
-                      border: "1px solid rgba(255,255,255,0.12)",
-                      background:
-                        item.zone === "IN_BUY_ZONE"
-                          ? "rgba(255,255,255,0.10)"
-                          : item.zone === "APPROACHING"
-                          ? "rgba(255,255,255,0.06)"
-                          : "transparent",
-                    }}
-                  >
-                    {zoneLabel(item.zone)}
-                  </span>
-
-                  {item.note ? <span style={{ fontSize: 12, opacity: 0.65 }}>• {item.note}</span> : null}
                 </div>
 
-                <button
-                  onClick={() => removeAsset(item.id)}
-                  style={{ ...styles.btn, padding: "8px 10px", background: "transparent", color: "rgba(255,255,255,0.8)" }}
-                >
-                  Remove
-                </button>
+                <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                  <div
+                    style={{
+                      ...styles.badge,
+                      background: confidenceBg(item.confidence),
+                      color: confidenceText(item.confidence),
+                    }}
+                  >
+                    {item.confidence}%
+                  </div>
+
+                  <button
+                    onClick={() => removeAsset(item.id)}
+                    style={styles.btnGhost}
+                  >
+                    ✕
+                  </button>
+                </div>
               </div>
             ))}
           </div>
