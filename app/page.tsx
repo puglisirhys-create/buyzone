@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useMemo, useState, useEffect, useRef } from "react";
 
 type AssetType = "CRYPTO" | "STOCK" | "ETF";
 type Zone = "IN_BUY_ZONE" | "APPROACHING" | "NOT_ATTRACTIVE";
@@ -13,6 +13,8 @@ type WatchItem = {
   addedAt: number;
   zone: Zone;
 };
+
+const STORAGE_KEY = "buyzone-watchlist"; // keep this stable (no version bumps)
 
 const styles = {
   page: { minHeight: "100vh", background: "#000", color: "#fff", padding: 24 },
@@ -37,12 +39,15 @@ const styles = {
 function normalizeTicker(v: string) {
   return v.trim().toUpperCase().replace(/\s+/g, "");
 }
+
 function typeLabel(t: AssetType) {
   return t === "CRYPTO" ? "Crypto" : t === "STOCK" ? "Stock" : "ETF";
 }
+
 function zoneLabel(z: Zone) {
   return z === "IN_BUY_ZONE" ? "In Buy Zone" : z === "APPROACHING" ? "Approaching" : "Not Attractive";
 }
+
 function mockZone(ticker: string, type: AssetType): Zone {
   const base = `${type}:${ticker}`;
   let sum = 0;
@@ -51,25 +56,82 @@ function mockZone(ticker: string, type: AssetType): Zone {
   return b === 0 ? "IN_BUY_ZONE" : b === 1 ? "APPROACHING" : "NOT_ATTRACTIVE";
 }
 
+// IMPORTANT: no Date.now() here (avoids hydration weirdness)
+function defaultItems(): WatchItem[] {
+  return [
+    { id: "1", ticker: "BTC", type: "CRYPTO", addedAt: 2, zone: "APPROACHING" },
+    { id: "2", ticker: "AAPL", type: "STOCK", addedAt: 1, zone: "NOT_ATTRACTIVE" },
+  ];
+}
+
+function safeParse<T>(raw: string | null): T | null {
+  if (!raw) return null;
+  try {
+    return JSON.parse(raw) as T;
+  } catch {
+    return null;
+  }
+}
+
+function trySave(items: WatchItem[]) {
+  localStorage.setItem(STORAGE_KEY, JSON.stringify(items));
+}
+
 export default function Home() {
+  const [mounted, setMounted] = useState(false);
+
   const [typeInput, setTypeInput] = useState<AssetType>("CRYPTO");
   const [tickerInput, setTickerInput] = useState("");
   const [noteInput, setNoteInput] = useState("");
 
-  const [items, setItems] = useState<WatchItem[]>([
-    { id: "1", ticker: "BTC", type: "CRYPTO", addedAt: Date.now() - 3600000, zone: "APPROACHING" },
-    { id: "2", ticker: "AAPL", type: "STOCK", addedAt: Date.now() - 1800000, zone: "NOT_ATTRACTIVE" },
-  ]);
+  const [items, setItems] = useState<WatchItem[]>(defaultItems);
+  const [status, setStatus] = useState<string | null>(null);
+
+  const itemsRef = useRef(items);
+  useEffect(() => {
+    itemsRef.current = items;
+  }, [items]);
+
+  useEffect(() => setMounted(true), []);
+
+  // Load saved data once
+  useEffect(() => {
+    if (!mounted) return;
+    try {
+      const saved = safeParse<WatchItem[]>(localStorage.getItem(STORAGE_KEY));
+      if (Array.isArray(saved)) {
+        setItems(saved.length ? saved : defaultItems());
+        setStatus("Loaded ✅");
+      } else {
+        setStatus("No saved data yet");
+      }
+    } catch (e: any) {
+      setStatus(`Load blocked: ${e?.message || "unknown error"}`);
+    }
+  }, [mounted]);
 
   const sorted = useMemo(() => [...items].sort((a, b) => b.addedAt - a.addedAt), [items]);
+
+  function refresh() {
+    const next = itemsRef.current.map((x) => ({ ...x, zone: mockZone(x.ticker, x.type) }));
+    setItems(next);
+    try {
+      trySave(next);
+      setStatus("Saved ✅");
+    } catch (e: any) {
+      setStatus(`Save blocked: ${e?.message || "unknown error"}`);
+    }
+  }
 
   function addAsset() {
     const ticker = normalizeTicker(tickerInput);
     if (!ticker) return;
-    if (items.some((x) => x.ticker === ticker && x.type === typeInput)) {
+
+    if (itemsRef.current.some((x) => x.ticker === ticker && x.type === typeInput)) {
       setTickerInput("");
       return;
     }
+
     const item: WatchItem = {
       id: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
       ticker,
@@ -78,18 +140,46 @@ export default function Home() {
       addedAt: Date.now(),
       zone: mockZone(ticker, typeInput),
     };
-    setItems((p) => [item, ...p]);
+
+    const next = [item, ...itemsRef.current];
+    setItems(next);
+
+    try {
+      trySave(next);
+      setStatus("Saved ✅");
+    } catch (e: any) {
+      setStatus(`Save blocked: ${e?.message || "unknown error"}`);
+    }
+
     setTickerInput("");
     setNoteInput("");
   }
 
   function removeAsset(id: string) {
-    setItems((p) => p.filter((x) => x.id !== id));
+    const next = itemsRef.current.filter((x) => x.id !== id);
+    setItems(next);
+
+    try {
+      trySave(next);
+      setStatus("Saved ✅");
+    } catch (e: any) {
+      setStatus(`Save blocked: ${e?.message || "unknown error"}`);
+    }
   }
 
-  function refresh() {
-    setItems((p) => p.map((x) => ({ ...x, zone: mockZone(x.ticker, x.type) })));
+  function clearAll() {
+    const next: WatchItem[] = [];
+    setItems(next);
+
+    try {
+      trySave(next);
+      setStatus("Saved ✅ (cleared)");
+    } catch (e: any) {
+      setStatus(`Save blocked: ${e?.message || "unknown error"}`);
+    }
   }
+
+  if (!mounted) return null;
 
   return (
     <main style={styles.page}>
@@ -121,6 +211,10 @@ export default function Home() {
               <button onClick={refresh} style={{ ...styles.btn, background: "transparent", color: "rgba(255,255,255,0.8)" }}>
                 Refresh
               </button>
+
+              <button onClick={clearAll} style={{ ...styles.btn, background: "transparent", color: "rgba(255,255,255,0.8)" }}>
+                Clear
+              </button>
             </div>
 
             <input
@@ -129,6 +223,11 @@ export default function Home() {
               placeholder="Optional note (e.g., long-term hold, weekly DCA)"
               style={styles.input}
             />
+
+            {status ? <div style={{ fontSize: 12, opacity: 0.75 }}>Status: {status}</div> : null}
+            <div style={{ fontSize: 12, opacity: 0.6 }}>
+              Tip: Always open the same URL (example: <span style={{ fontFamily: "monospace" }}>http://localhost:3000</span>). Different ports/addresses won’t share saved data.
+            </div>
           </div>
 
           <div style={{ display: "flex", justifyContent: "space-between", marginTop: 14, opacity: 0.7 }}>
@@ -189,10 +288,6 @@ export default function Home() {
               </div>
             ))}
           </div>
-
-          <p style={{ marginTop: 14, fontSize: 12, opacity: 0.55 }}>
-            Prototype mode: zones are simulated. Next: real buy zones from price history + confidence (not predictions).
-          </p>
         </section>
       </div>
     </main>
