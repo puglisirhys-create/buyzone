@@ -153,9 +153,9 @@ function confidenceText(conf: number) {
 }
 
 function glowShadow(conf: number) {
-  if (conf >= 70) return "0 0 22px rgba(46,204,113,0.45)";
-  if (conf >= 50) return "0 0 22px rgba(241,196,15,0.45)";
-  return "0 0 18px rgba(255,255,255,0.20)";
+  if (conf >= 70) return "0 0 26px rgba(46,204,113,0.65)";
+  if (conf >= 50) return "0 0 26px rgba(241,196,15,0.65)";
+  return "0 0 22px rgba(255,255,255,0.20)";
 }
 
 function defaultItems(): WatchItem[] {
