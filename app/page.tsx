@@ -1,9 +1,12 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
+import {
+  calculateBuyZoneSignal,
+  type Zone,
+} from "@/lib/buyzone-engine";
 
 type AssetType = "CRYPTO" | "STOCK" | "ETF";
-type Zone = "IN_BUY_ZONE" | "APPROACHING" | "NOT_ATTRACTIVE";
 
 type WatchItem = {
   id: string;
@@ -28,7 +31,6 @@ const styles = {
     fontFamily:
       "Inter, system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif",
   },
-
   wrap: {
     maxWidth: 980,
     margin: "0 auto",
@@ -191,12 +193,12 @@ const styles = {
   },
 
   sectionCount: {
-    fontSize: 12,
-    opacity: 0.7,
+    fontSize: 13,
     padding: "4px 10px",
     borderRadius: 999,
     border: "1px solid rgba(255,255,255,0.08)",
     background: "rgba(255,255,255,0.03)",
+    opacity: 0.7,
   },
 
   sectionDivider: {
@@ -266,6 +268,7 @@ const styles = {
     gap: 8,
     fontSize: 12,
     fontWeight: 700,
+    padding: "7px 12px",
   },
 
   progressIcon: {
@@ -382,57 +385,6 @@ function zoneSectionLabel(zone: Zone) {
   return "Not Attractive";
 }
 
-function hashToInt(input: string) {
-  let hash = 0;
-  for (let i = 0; i < input.length; i++) {
-    hash = (hash * 31 + input.charCodeAt(i)) >>> 0;
-  }
-  return hash;
-}
-
-function confidenceToZone(confidence: number): Zone {
-  if (confidence >= 70) return "IN_BUY_ZONE";
-  if (confidence >= 50) return "APPROACHING";
-  return "NOT_ATTRACTIVE";
-}
-
-function computeBaseSignal(ticker: string, type: AssetType) {
-  const hash = hashToInt(`${type}:${ticker}`);
-  return 30 + (hash % 60);
-}
-
-function computeRefreshShift(seed: string) {
-  const nowBucket = Math.floor(Date.now() / 60000);
-  const hash = hashToInt(`${seed}:${nowBucket}`);
-  return (hash % 7) - 3;
-}
-
-function clampConfidence(value: number) {
-  return Math.max(0, Math.min(100, value));
-}
-
-function computeMockSignal(
-  ticker: string,
-  type: AssetType,
-  previousConfidence?: number | null
-) {
-  if (previousConfidence == null) {
-    const confidence = computeBaseSignal(ticker, type);
-    return {
-      confidence,
-      zone: confidenceToZone(confidence),
-    };
-  }
-
-  const shift = computeRefreshShift(`${type}:${ticker}`);
-  const confidence = clampConfidence(previousConfidence + shift);
-
-  return {
-    confidence,
-    zone: confidenceToZone(confidence),
-  };
-}
-
 function zoneGlow(zone: Zone) {
   if (zone === "IN_BUY_ZONE") return "0 0 30px rgba(46,204,113,0.28)";
   if (zone === "APPROACHING") return "0 0 28px rgba(241,196,15,0.22)";
@@ -516,28 +468,43 @@ function getProgressMeta(current: number, previous: number | null) {
   };
 }
 
-function defaultItems(): WatchItem[] {
-  const btc = computeMockSignal("BTC", "CRYPTO");
-  const aapl = computeMockSignal("AAPL", "STOCK");
+async function fetchRealSignal(ticker: string) {
+  const historyRes = await fetch(`/api/history?symbol=${ticker}&days=365`, {
+    cache: "no-store",
+  });
 
-  return [
-    {
-      id: "seed-btc",
-      ticker: "BTC",
-      type: "CRYPTO",
-      addedAt: 2,
-      previousConfidence: null,
-      ...btc,
-    },
-    {
-      id: "seed-aapl",
-      ticker: "AAPL",
-      type: "STOCK",
-      addedAt: 1,
-      previousConfidence: null,
-      ...aapl,
-    },
-  ];
+  const historyData = await historyRes.json();
+
+ if (!historyData.ok) {
+  if (historyData.error?.includes("plan")) {
+    throw new Error(
+      "Data provider restriction: This asset isn't available on the current plan."
+    );
+  }
+
+  throw new Error(historyData.error || `Failed to load history for ${ticker}`);
+}
+
+  return calculateBuyZoneSignal(ticker, historyData.bars);
+}
+
+function toWatchItem(
+  ticker: string,
+  type: AssetType,
+  score: number,
+  zone: Zone,
+  addedAt: number,
+  previousConfidence: number | null
+): WatchItem {
+  return {
+    id: `id-${ticker}-${addedAt}`,
+    ticker,
+    type,
+    addedAt,
+    confidence: score,
+    zone,
+    previousConfidence,
+  };
 }
 
 function safeLoad(): WatchItem[] | null {
@@ -564,7 +531,7 @@ function safeLoad(): WatchItem[] | null {
         addedAt: Number(item.addedAt),
         confidence,
         previousConfidence,
-        zone: confidenceToZone(confidence),
+        zone: item.zone as Zone,
       };
     });
   } catch {
@@ -575,21 +542,64 @@ function safeLoad(): WatchItem[] | null {
 function safeSave(items: WatchItem[]) {
   try {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(items));
-  } catch {}
+  } catch {
+    // ignore write failures
+  }
 }
 
 export default function Home() {
-  const [typeInput, setTypeInput] = useState<AssetType>("CRYPTO");
+  const [typeInput, setTypeInput] = useState<AssetType>("STOCK");
   const [tickerInput, setTickerInput] = useState("");
-  const [items, setItems] = useState<WatchItem[]>(defaultItems);
+  const [items, setItems] = useState<WatchItem[]>([]);
+  const [isBootstrapping, setIsBootstrapping] = useState(true);
+  const [isAdding, setIsAdding] = useState(false);
+  const [isRefreshing, setIsRefreshing] = useState(false);
   const didLoadRef = useRef(false);
 
   useEffect(() => {
-    const saved = safeLoad();
-    if (saved) {
-      setItems(saved);
+    async function bootstrap() {
+      const saved = safeLoad();
+
+      if (saved && saved.length > 0) {
+        setItems(saved);
+        setIsBootstrapping(false);
+        didLoadRef.current = true;
+        return;
+      }
+
+      try {
+       const seeds: Array<{ ticker: string; type: AssetType }> = [
+  { ticker: "SPY", type: "ETF" },
+  { ticker: "QQQ", type: "ETF" },
+  { ticker: "VTI", type: "ETF" },
+];
+
+        const seeded = await Promise.all(
+          seeds.map(async (seed, index) => {
+            const signal = await fetchRealSignal(seed.ticker);
+
+            return toWatchItem(
+              seed.ticker,
+              seed.type,
+              signal.score,
+              signal.zone,
+              Date.now() - (seeds.length - index),
+              null
+            );
+          })
+        );
+
+        setItems(seeded);
+      } catch (error) {
+        console.error("Bootstrap failed:", error);
+        setItems([]);
+      } finally {
+        setIsBootstrapping(false);
+        didLoadRef.current = true;
+      }
     }
-    didLoadRef.current = true;
+
+    bootstrap();
   }, []);
 
   useEffect(() => {
@@ -622,59 +632,95 @@ export default function Home() {
   async function addAsset() {
     const ticker = normalizeTicker(tickerInput);
 
-    if (!ticker) return;
-    if (!isValidTicker(ticker)) return;
+    if (!ticker || isAdding) return;
+
+    if (!isValidTicker(ticker)) {
+      alert("Invalid ticker format");
+      return;
+    }
+
+    setIsAdding(true);
 
     try {
-      const res = await fetch(`/api/lookup?ticker=${ticker}`);
-      const data = await res.json();
+      const lookupRes = await fetch(`/api/lookup?ticker=${ticker}`, {
+        cache: "no-store",
+      });
+      const lookupData = await lookupRes.json();
 
-      if (!data.ok) {
+      if (!lookupData.ok) {
         alert("Ticker not found");
         return;
       }
 
-      const realType = data.type as AssetType;
+      const realTicker = String(lookupData.ticker || ticker).toUpperCase();
+      const realType = (lookupData.type as AssetType) || typeInput;
 
-      setItems((prev) => {
-        if (prev.some((item) => item.ticker === data.ticker)) {
-          return prev;
-        }
+if (realType === "CRYPTO") {
+  alert("Crypto is not supported in this version yet.");
+  return;
+}
+      
+      if (items.some((item) => item.ticker === realTicker)) {
+        alert("Ticker already in watchlist");
+        return;
+      }
 
-        const signal = computeMockSignal(data.ticker, realType);
-
-        return [
-          {
-            id: `id-${Date.now()}`,
-            ticker: data.ticker,
-            type: realType,
-            addedAt: Date.now(),
-            previousConfidence: null,
-            ...signal,
-          },
-          ...prev,
-        ];
-      });
+      const signal = await fetchRealSignal(realTicker);
+      setItems((prev) => [
+        toWatchItem(
+          realTicker,
+          realType,
+          signal.score,
+          signal.zone,
+          Date.now(),
+          null
+        ),
+        ...prev,
+      ]);
 
       setTickerInput("");
     } catch (error) {
       console.error(error);
-      alert("Something went wrong looking up that ticker");
+      alert(
+        error instanceof Error
+          ? error.message
+          : "Something went wrong adding that ticker"
+      );
+    } finally {
+      setIsAdding(false);
     }
   }
 
-  function refresh() {
-    setItems((prev) =>
-      prev.map((item) => {
-        const signal = computeMockSignal(item.ticker, item.type, item.confidence);
+  async function refresh() {
+    if (isRefreshing || items.length === 0) return;
 
-        return {
-          ...item,
-          previousConfidence: item.confidence,
-          ...signal,
-        };
-      })
-    );
+    setIsRefreshing(true);
+
+    try {
+      const refreshed = await Promise.all(
+        items.map(async (item) => {
+          const signal = await fetchRealSignal(item.ticker);
+
+          return {
+            ...item,
+            previousConfidence: item.confidence,
+            confidence: signal.score,
+            zone: signal.zone,
+          };
+        })
+      );
+
+      setItems(refreshed);
+    } catch (error) {
+      console.error(error);
+      alert(
+        error instanceof Error
+          ? error.message
+          : "Something went wrong refreshing the watchlist"
+      );
+    } finally {
+      setIsRefreshing(false);
+    }
   }
 
   function removeAsset(id: string) {
@@ -719,7 +765,9 @@ export default function Home() {
             }}
           >
             <div style={styles.summaryLabel}>Not Attractive</div>
-            <div style={styles.summaryValue}>{grouped.NOT_ATTRACTIVE.length}</div>
+            <div style={styles.summaryValue}>
+              {grouped.NOT_ATTRACTIVE.length}
+            </div>
             <div style={styles.summarySubtle}>Currently low edge</div>
           </div>
 
@@ -768,23 +816,33 @@ export default function Home() {
               style={{ ...styles.input, flex: 1, minWidth: 220 }}
             />
 
-            <button onClick={addAsset} style={styles.btnPrimary}>
-              Add
+            <button
+              onClick={addAsset}
+              style={styles.btnPrimary}
+              disabled={isAdding || isBootstrapping}
+            >
+              {isAdding ? "Adding..." : "Add"}
             </button>
 
-            <button onClick={refresh} style={styles.btnGhost}>
-              Refresh
+            <button
+              onClick={refresh}
+              style={styles.btnGhost}
+              disabled={isRefreshing || isBootstrapping || items.length === 0}
+            >
+              {isRefreshing ? "Refreshing..." : "Refresh"}
             </button>
           </div>
 
           <div style={styles.metaRow}>
-            <span>Watchlist</span>
+            <span>{isBootstrapping ? "Loading watchlist..." : "Watchlist"}</span>
             <span>{sorted.length} assets</span>
           </div>
 
           {sorted.length === 0 ? (
             <div style={styles.emptyState}>
-              No assets yet. Add a ticker to start building your watchlist.
+              {isBootstrapping
+                ? "Loading starter assets..."
+                : "No assets yet. Add a ticker to start building your watchlist."}
             </div>
           ) : (
             <div style={styles.sectionsWrap}>
@@ -814,7 +872,8 @@ export default function Home() {
                       </div>
 
                       <div style={styles.sectionCount}>
-                        {zoneItems.length} {zoneItems.length === 1 ? "asset" : "assets"}
+                        {zoneItems.length}{" "}
+                        {zoneItems.length === 1 ? "asset" : "assets"}
                       </div>
                     </div>
 
@@ -858,9 +917,13 @@ export default function Home() {
                                   color: progress.color,
                                 }}
                               >
-                                <span style={styles.progressIcon}>{progress.icon}</span>
+                                <span style={styles.progressIcon}>
+                                  {progress.icon}
+                                </span>
                                 <span>{progress.label}</span>
-                                <span style={{ opacity: 0.8 }}>{progress.deltaText}</span>
+                                <span style={{ opacity: 0.8 }}>
+                                  {progress.deltaText}
+                                </span>
                               </div>
 
                               <div style={{ display: "grid", gap: 7 }}>
@@ -886,9 +949,15 @@ export default function Home() {
                                 </div>
 
                                 <div style={styles.meterRow}>
-                                  <div style={styles.meterCellLeft}>Not Attractive</div>
-                                  <div style={styles.meterCellCenter}>Approaching</div>
-                                  <div style={styles.meterCellRight}>In Buy Zone</div>
+                                  <div style={styles.meterCellLeft}>
+                                    Not Attractive
+                                  </div>
+                                  <div style={styles.meterCellCenter}>
+                                    Approaching
+                                  </div>
+                                  <div style={styles.meterCellRight}>
+                                    In Buy Zone
+                                  </div>
                                 </div>
                               </div>
                             </div>

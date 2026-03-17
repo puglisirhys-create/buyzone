@@ -1,106 +1,158 @@
 import { NextResponse } from "next/server";
 
-type Candle = {
-  t: string; // ISO date
-  o: number;
-  h: number;
-  l: number;
-  c: number;
-  v: number;
+const BASE_URL = "https://api.twelvedata.com";
+
+type TwelveTimeSeriesResponse = {
+  values?: Array<{
+    datetime: string;
+    close: string;
+  }>;
+  status?: string;
+  message?: string;
 };
 
-function clamp(n: number, min: number, max: number) {
-  return Math.max(min, Math.min(max, n));
-}
+function getApiKey(): string {
+  const key = process.env.TWELVE_DATA_API_KEY;
 
-function hashString(s: string) {
-  // simple deterministic hash
-  let h = 2166136261;
-  for (let i = 0; i < s.length; i++) {
-    h ^= s.charCodeAt(i);
-    h = Math.imul(h, 16777619);
-  }
-  return h >>> 0;
-}
+  // 🔍 DEBUG (temporary)
+  console.log("API key loaded:", key ? `${key.slice(0, 6)}...` : "MISSING");
 
-function generateMockHistory(symbol: string, days: number): Candle[] {
-  const baseHash = hashString(symbol);
-  const volatility = 0.008 + (baseHash % 30) / 3000; // ~0.8% to ~1.8%
-  const drift = ((baseHash % 200) - 100) / 100000; // small drift
-  const startPrice = 20 + (baseHash % 8000) / 100; // 20..100
-  const start = new Date();
-  start.setUTCHours(0, 0, 0, 0);
-  start.setUTCDate(start.getUTCDate() - (days - 1));
-
-  let price = startPrice;
-  const out: Candle[] = [];
-
-  for (let i = 0; i < days; i++) {
-    const d = new Date(start);
-    d.setUTCDate(start.getUTCDate() + i);
-
-    // deterministic pseudo-random based on day + symbol
-    const r1 = (hashString(symbol + "|a|" + i) % 10000) / 10000;
-    const r2 = (hashString(symbol + "|b|" + i) % 10000) / 10000;
-    const r3 = (hashString(symbol + "|c|" + i) % 10000) / 10000;
-
-    const dailyMove = (r1 - 0.5) * 2 * volatility + drift;
-    const open = price;
-    let close = open * (1 + dailyMove);
-
-    // keep it sane
-    close = clamp(close, open * 0.85, open * 1.15);
-
-    const high = Math.max(open, close) * (1 + r2 * volatility);
-    const low = Math.min(open, close) * (1 - r3 * volatility);
-
-    const vol = Math.floor(1000 + (hashString(symbol + "|v|" + i) % 50000));
-
-    out.push({
-      t: d.toISOString().slice(0, 10),
-      o: Number(open.toFixed(4)),
-      h: Number(high.toFixed(4)),
-      l: Number(low.toFixed(4)),
-      c: Number(close.toFixed(4)),
-      v: vol,
-    });
-
-    price = close;
+  if (!key) {
+    throw new Error("Missing TWELVE_DATA_API_KEY in .env.local");
   }
 
-  return out;
+  return key;
+}
+
+function clamp(value: number, min: number, max: number) {
+  return Math.max(min, Math.min(max, value));
+}
+
+function buildUrl(
+  path: string,
+  params: Record<string, string | number | undefined>
+) {
+  const url = new URL(`${BASE_URL}${path}`);
+
+  for (const [key, value] of Object.entries(params)) {
+    if (value !== undefined) {
+      url.searchParams.set(key, String(value));
+    }
+  }
+
+  return url;
+}
+
+async function twelveFetch<T>(url: URL): Promise<T> {
+  // ✅ Add API key correctly
+  url.searchParams.set("apikey", getApiKey());
+
+  const res = await fetch(url.toString(), {
+    cache: "no-store",
+  });
+
+  if (!res.ok) {
+    throw new Error(`Twelve Data HTTP error: ${res.status}`);
+  }
+
+  const data = await res.json();
+
+  if (data?.status === "error") {
+    throw new Error(data.message || "Twelve Data returned an error");
+  }
+
+  return data as T;
 }
 
 export async function GET(req: Request) {
-  const { searchParams } = new URL(req.url);
+  try {
+    const { searchParams } = new URL(req.url);
 
-  const symbolRaw = (searchParams.get("symbol") || "").trim();
-  const symbol = symbolRaw.toUpperCase();
+    const symbolRaw = (searchParams.get("symbol") || "").trim();
+    const symbol = symbolRaw.toUpperCase();
 
-  const daysRaw = searchParams.get("days") || "365";
-  const days = clamp(parseInt(daysRaw, 10) || 365, 30, 2000);
+    const daysRaw = searchParams.get("days") || "365";
+    const days = clamp(parseInt(daysRaw, 10) || 365, 30, 500);
 
-  if (!symbol) {
+    if (!symbol) {
+      return NextResponse.json(
+        {
+          ok: false,
+          error: "Missing ?symbol= (example: /api/history?symbol=SPY&days=365)",
+        },
+        { status: 400 }
+      );
+    }
+
+    const url = buildUrl("/time_series", {
+      symbol,
+      interval: "1day",
+      outputsize: days,
+      timezone: "Exchange",
+    });
+
+    const data = await twelveFetch<TwelveTimeSeriesResponse>(url);
+
+    if (!data.values || data.values.length === 0) {
+      return NextResponse.json(
+        {
+          ok: false,
+          error: `No historical data returned for ${symbol}`,
+        },
+        { status: 404 }
+      );
+    }
+
+    const bars = [...data.values]
+      .map((row) => ({
+        datetime: row.datetime,
+        close: Number(row.close),
+      }))
+      .filter(
+        (row) =>
+          row.datetime &&
+          Number.isFinite(row.close) &&
+          row.close > 0
+      )
+      .sort(
+        (a, b) =>
+          new Date(a.datetime).getTime() - new Date(b.datetime).getTime()
+      );
+
+    if (bars.length < 200) {
+      return NextResponse.json(
+        {
+          ok: false,
+          error: `Not enough valid daily bars for ${symbol}. Need at least 200, got ${bars.length}.`,
+        },
+        { status: 422 }
+      );
+    }
+
     return NextResponse.json(
-      { ok: false, error: "Missing ?symbol= (example: /api/history?symbol=BTC&days=365)" },
-      { status: 400 }
+      {
+        ok: true,
+        symbol,
+        bars,
+      },
+      {
+        headers: {
+          "Cache-Control": "no-store",
+        },
+      }
+    );
+  } catch (error) {
+    console.error("History route error:", error);
+
+    return NextResponse.json(
+      {
+        ok: false,
+        error:
+          error instanceof Error
+            ? error.message
+            : "Unknown history route error",
+      },
+      { status: 500 }
     );
   }
-
-  // deterministic mock history for now (we’ll swap to real provider later)
-  const candles = generateMockHistory(symbol, days);
-
-  return NextResponse.json(
-    {
-      ok: true,
-      symbol,
-      days,
-      candles,
-    },
-    {
-      headers: {
-        "Cache-Control": "no-store",
-      },
-    }
-  );
 }
